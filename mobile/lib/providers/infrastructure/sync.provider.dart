@@ -4,6 +4,7 @@ import 'package:immich_mobile/domain/services/local_sync.service.dart';
 import 'package:immich_mobile/domain/services/sync_stream.service.dart';
 import 'package:immich_mobile/infrastructure/repositories/sync_api.repository.dart';
 import 'package:immich_mobile/providers/api.provider.dart';
+import 'package:immich_mobile/providers/backup/backup_policy_guard.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/cancel.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
@@ -22,6 +23,7 @@ final syncStreamServiceProvider = Provider((ref) {
     syncMigrationRepository: db.syncMigrationRepository,
     api: ref.watch(apiServiceProvider),
     cancellation: ref.watch(cancellationProvider),
+    backupPolicyGuard: ref.watch(backupPolicyGuardProvider),
   );
 });
 
@@ -36,6 +38,7 @@ final localSyncServiceProvider = Provider((ref) {
     permissionRepository: ref.watch(permissionRepositoryProvider),
     nativeSyncApi: ref.watch(nativeSyncApiProvider),
     cancellation: ref.watch(cancellationProvider),
+    backupPolicyGuard: ref.watch(backupPolicyGuardProvider),
   );
 });
 

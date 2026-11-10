@@ -15,6 +15,8 @@ import 'package:immich_mobile/data/db/main/table/app/settings.dart';
 import 'package:immich_mobile/data/db/main/table/app/store.dart';
 import 'package:immich_mobile/data/db/main/table/asset/edit.dart';
 import 'package:immich_mobile/data/db/main/table/asset/ocr.dart';
+import 'package:immich_mobile/data/db/main/table/backup/history.dart';
+import 'package:immich_mobile/data/db/main/table/backup/policy.dart';
 import 'package:immich_mobile/data/db/main/table/local/album.dart';
 import 'package:immich_mobile/data/db/main/table/local/album_asset.dart';
 import 'package:immich_mobile/data/db/main/table/local/asset.dart';
@@ -38,6 +40,7 @@ import 'package:immich_mobile/data/db/main/table/user/metadata.dart';
 import 'package:immich_mobile/data/db/main/table/user/partner.dart';
 import 'package:immich_mobile/data/db/main/table/user/user.dart';
 import 'package:immich_mobile/infrastructure/repositories/backup.repository.dart';
+import 'package:immich_mobile/infrastructure/repositories/backup_policy.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/local_album.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/local_asset.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/map.repository.dart';
@@ -85,11 +88,14 @@ import 'package:sqlite_async/sqlite_async.dart';
     AssetEditEntity,
     SettingsEntity,
     AssetOcrEntity,
+    BackupPolicyEntity,
+    BackupHistoryEntity,
   ],
   include: {'package:immich_mobile/data/db/main/query/merged_asset.drift'},
   daos: [
     AuthUserRepository,
     BackupRepository,
+    BackupPolicyRepository,
     LocalAlbumRepository,
     LocalAssetRepository,
     MapRepository,
@@ -128,6 +134,10 @@ class Drift extends $Drift {
   Future<void> reset() async {
     // https://github.com/simolus3/drift/commit/bd80a46264b6dd833ef4fd87fffc03f5a832ab41#diff-3f879e03b4a35779344ef16170b9353608dd9c42385f5402ec6035aac4dd8a04R76-R94
     await exclusively(() async {
+      await customStatement('DROP TABLE IF EXISTS temp.backup_policy_reset');
+      await customStatement('DROP TABLE IF EXISTS temp.backup_history_reset');
+      await customStatement('CREATE TEMP TABLE backup_policy_reset AS SELECT * FROM backup_policy_entity');
+      await customStatement('CREATE TEMP TABLE backup_history_reset AS SELECT * FROM backup_history_entity');
       // https://stackoverflow.com/a/65743498/25690041
       await customStatement('PRAGMA writable_schema = 1;');
       await customStatement('DELETE FROM sqlite_master;');
@@ -142,6 +152,14 @@ class Drift extends $Drift {
         OpeningDetails(null, schemaVersion),
       );
       await customStatement('PRAGMA user_version = $schemaVersion');
+      await customStatement('''
+        INSERT INTO backup_policy_entity (scope, status, media_store_version, revision, media_store_epoch)
+        SELECT scope, CASE WHEN status = 0 THEN 0 ELSE 3 END, media_store_version, revision + 1, media_store_epoch
+        FROM temp.backup_policy_reset
+      ''');
+      await customStatement('INSERT INTO backup_history_entity SELECT * FROM temp.backup_history_reset');
+      await customStatement('DROP TABLE temp.backup_policy_reset');
+      await customStatement('DROP TABLE temp.backup_history_reset');
 
       // Refresh all stream queries
       notifyUpdates({for (final table in allTables) TableUpdate.onTable(table)});
@@ -160,7 +178,7 @@ class Drift extends $Drift {
   }
 
   @override
-  int get schemaVersion => 35;
+  int get schemaVersion => 36;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -379,6 +397,10 @@ class Drift extends $Drift {
                 await m.addColumn(v35.localAssetEntity, v35.localAssetEntity.groupDate);
                 await m.createIndex(v35.idxRemoteAssetGroup);
                 await m.createIndex(v35.idxLocalAssetGroup);
+              },
+              from35To36: (m, v36) async {
+                await m.createTable(v36.backupPolicyEntity);
+                await m.createTable(v36.backupHistoryEntity);
               },
             ),
           );

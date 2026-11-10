@@ -6,8 +6,10 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:immich_mobile/data/db/main/database.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
+import 'package:immich_mobile/domain/models/backup_policy.model.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/domain/models/sync_event.model.dart';
+import 'package:immich_mobile/domain/services/backup_policy_guard.service.dart';
 import 'package:immich_mobile/domain/services/store.service.dart';
 import 'package:immich_mobile/domain/services/sync_stream.service.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
@@ -52,6 +54,7 @@ void main() {
   late _MockAbortCallbackWrapper mockResetCallbackWrapper;
   late Drift db;
   late bool hasManageMediaPermission;
+  var onlyNew = false;
 
   setUpAll(() async {
     TestWidgetsFlutterBinding.ensureInitialized();
@@ -72,6 +75,7 @@ void main() {
   Future<bool> successHandler(Invocation _) async => true;
 
   setUp(() async {
+    onlyNew = false;
     mockSyncStreamRepo = MockSyncStreamRepository();
     mockSyncApiRepo = MockSyncApiRepository();
     mockLocalAssetRepo = MockLocalAssetRepository();
@@ -111,9 +115,9 @@ void main() {
     when(() => mockSyncApiRepo.deleteSyncAck(any())).thenAnswer((_) async => {});
 
     when(() => mockApi.serverInfoApi).thenReturn(mockServerApi);
-    when(
-      () => mockServerApi.getServerVersion(),
-    ).thenAnswer((_) async => ServerVersionResponseDto(major: 1, minor: 132, patch_: 0, prerelease: null, featureLevel: 1));
+    when(() => mockServerApi.getServerVersion()).thenAnswer(
+      (_) async => ServerVersionResponseDto(major: 1, minor: 132, patch_: 0, prerelease: null, featureLevel: 1),
+    );
 
     when(() => mockSyncStreamRepo.updateUsersV1(any())).thenAnswer(successHandler);
     when(() => mockSyncStreamRepo.deleteUsersV1(any())).thenAnswer(successHandler);
@@ -150,6 +154,14 @@ void main() {
     when(() => mockSyncMigrationRepo.v20260128CopyExifWidthHeightToAsset()).thenAnswer(successHandler);
 
     sut = SyncStreamService(
+      backupPolicyGuard: BackupPolicyGuard(
+        getScope: () => 'scope',
+        getUserId: () => 'user',
+        getPolicy: (_) async =>
+            BackupPolicy(scope: 'scope', status: onlyNew ? BackupPolicyStatus.active : BackupPolicyStatus.legacy),
+        getMediaStoreVersion: () async => 'v1',
+        pause: (_, {expectedRevision}) async {},
+      ),
       syncApiRepository: mockSyncApiRepo,
       syncStreamRepository: mockSyncStreamRepo,
       localAssetRepository: mockLocalAssetRepo,
@@ -415,6 +427,21 @@ void main() {
       hasManageMediaPermission = false;
     });
 
+    test('new-files mode updates server deletion indexes without deleting device files', () async {
+      onlyNew = true;
+      await simulateEvents([SyncStreamStub.assetDeleteV1]);
+      verify(() => mockSyncStreamRepo.deleteAssetsV1(any())).called(1);
+      verifyNever(() => mockLocalAssetRepo.getAssetsFromBackupAlbums(any()));
+      verifyNever(() => mockAssetMediaRepo.deleteAll(any()));
+    });
+
+    test('new-files mode updates server assets without restoring device trash', () async {
+      onlyNew = true;
+      await simulateEvents([SyncStreamStub.assetModified(id: 'remote', checksum: 'checksum', ack: 'ack')]);
+      verify(() => mockSyncStreamRepo.updateAssetsV1(any())).called(1);
+      verifyNever(() => mockTrashedLocalAssetRepo.getToRestore());
+      verifyNever(() => mockAssetMediaRepo.restoreAssetsFromTrash(any()));
+    });
     test("moves backed up local and merged assets to device trash when remote trash events are received", () async {
       final localAsset = LocalAssetStub.image1.copyWith(id: 'local-only', checksum: 'checksum-local', remoteId: null);
       final mergedAsset = LocalAssetStub.image2.copyWith(
@@ -565,9 +592,9 @@ void main() {
   group('SyncStreamService - Sync Migration', () {
     test('ensure that <2.5.0 migrations run', () async {
       await Store.put(StoreKey.syncMigrationStatus, "[]");
-      when(
-        () => mockServerApi.getServerVersion(),
-      ).thenAnswer((_) async => ServerVersionResponseDto(major: 2, minor: 4, patch_: 1, prerelease: null, featureLevel: 1));
+      when(() => mockServerApi.getServerVersion()).thenAnswer(
+        (_) async => ServerVersionResponseDto(major: 2, minor: 4, patch_: 1, prerelease: null, featureLevel: 1),
+      );
 
       await sut.sync();
 
@@ -593,9 +620,9 @@ void main() {
     });
     test('ensure that >=2.5.0 migrations run', () async {
       await Store.put(StoreKey.syncMigrationStatus, "[]");
-      when(
-        () => mockServerApi.getServerVersion(),
-      ).thenAnswer((_) async => ServerVersionResponseDto(major: 2, minor: 5, patch_: 0, prerelease: null, featureLevel: 1));
+      when(() => mockServerApi.getServerVersion()).thenAnswer(
+        (_) async => ServerVersionResponseDto(major: 2, minor: 5, patch_: 0, prerelease: null, featureLevel: 1),
+      );
       await sut.sync();
 
       verifyInOrder([
@@ -623,9 +650,9 @@ void main() {
         '["${SyncMigrationTask.v20260128_CopyExifWidthHeightToAsset.name}"]',
       );
 
-      when(
-        () => mockServerApi.getServerVersion(),
-      ).thenAnswer((_) async => ServerVersionResponseDto(major: 2, minor: 4, patch_: 1, prerelease: null, featureLevel: 1));
+      when(() => mockServerApi.getServerVersion()).thenAnswer(
+        (_) async => ServerVersionResponseDto(major: 2, minor: 4, patch_: 1, prerelease: null, featureLevel: 1),
+      );
 
       await sut.sync();
 

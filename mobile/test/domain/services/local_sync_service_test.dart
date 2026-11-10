@@ -3,8 +3,11 @@ import 'package:drift/native.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:immich_mobile/data/db/main/database.dart';
+import 'package:immich_mobile/domain/models/album/local_album.model.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
+import 'package:immich_mobile/domain/models/backup_policy.model.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
+import 'package:immich_mobile/domain/services/backup_policy_guard.service.dart';
 import 'package:immich_mobile/domain/services/local_sync.service.dart';
 import 'package:immich_mobile/domain/services/store.service.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
@@ -28,9 +31,12 @@ void main() {
   late MockPermissionRepository mockPermissionRepository;
   late MockNativeSyncApi mockNativeSyncApi;
   late Drift db;
+  var onlyNew = false;
 
   setUpAll(() async {
     TestWidgetsFlutterBinding.ensureInitialized();
+    registerFallbackValue(<LocalAlbum>[]);
+    registerFallbackValue(<String, List<LocalAsset>>{});
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
 
     db = Drift(drift.DatabaseConnection(NativeDatabase.memory(), closeStreamsSynchronously: true));
@@ -44,6 +50,7 @@ void main() {
   });
 
   setUp(() async {
+    onlyNew = false;
     mockLocalAlbumRepository = MockLocalAlbumRepository();
     mockTrashedLocalAssetRepository = MockTrashedLocalAssetRepository();
     mockAssetMediaRepository = MockAssetMediaRepository();
@@ -66,6 +73,17 @@ void main() {
     });
 
     sut = LocalSyncService(
+      backupPolicyGuard: BackupPolicyGuard(
+        getScope: () => 'scope',
+        getUserId: () => 'user',
+        getPolicy: (_) async => BackupPolicy(
+          scope: 'scope',
+          status: onlyNew ? BackupPolicyStatus.active : BackupPolicyStatus.legacy,
+          mediaStoreVersion: 'v1',
+        ),
+        getMediaStoreVersion: () async => 'v1',
+        pause: (_, {expectedRevision}) async {},
+      ),
       localAlbumRepository: mockLocalAlbumRepository,
       trashedLocalAssetRepository: mockTrashedLocalAssetRepository,
       assetMediaRepository: mockAssetMediaRepository,
@@ -75,6 +93,45 @@ void main() {
 
     await Store.put(StoreKey.manageLocalMediaAndroid, false);
     when(() => mockPermissionRepository.hasManageMediaPermission()).thenAnswer((_) async => false);
+  });
+
+  test('strict baseline scans read every album before committing a complete snapshot', () async {
+    when(
+      () => mockNativeSyncApi.getAlbums(),
+    ).thenAnswer((_) async => [PlatformAlbum(id: 'album', name: 'Camera', isCloud: false, assetCount: 0)]);
+    when(() => mockLocalAlbumRepository.getAll()).thenAnswer((_) async => []);
+    when(() => mockNativeSyncApi.getAssetsForAlbum('album')).thenAnswer((_) async => []);
+    when(() => mockLocalAlbumRepository.replaceSnapshot(any(), any())).thenAnswer((_) async {});
+    when(() => mockNativeSyncApi.checkpointSync()).thenAnswer((_) async {});
+    await sut.sync(full: true, throwOnError: true);
+    verifyInOrder([
+      () => mockNativeSyncApi.getAssetsForAlbum('album'),
+      () => mockLocalAlbumRepository.replaceSnapshot(any(), any()),
+      () => mockNativeSyncApi.checkpointSync(),
+    ]);
+  });
+
+  test('strict baseline scans propagate album enumeration failures', () async {
+    when(() => mockNativeSyncApi.getAlbums()).thenThrow(StateError('permission revoked'));
+    await expectLater(sut.sync(full: true, throwOnError: true, skipMediaManagement: true), throwsStateError);
+    verifyNever(() => mockNativeSyncApi.checkpointSync());
+  });
+
+  test('strict baseline scans propagate failures inside an album', () async {
+    when(
+      () => mockNativeSyncApi.getAlbums(),
+    ).thenAnswer((_) async => [PlatformAlbum(id: 'album', name: 'Camera', isCloud: false, assetCount: 1)]);
+    when(() => mockLocalAlbumRepository.getAll()).thenAnswer((_) async => []);
+    when(() => mockNativeSyncApi.getAssetsForAlbum('album')).thenThrow(StateError('scan interrupted'));
+    await expectLater(sut.sync(full: true, throwOnError: true), throwsStateError);
+    verifyNever(() => mockNativeSyncApi.checkpointSync());
+  });
+
+  test('new-files mode blocks the public local trash synchronization entry', () async {
+    onlyNew = true;
+    await sut.processTrashedAssets({});
+    verifyZeroInteractions(mockTrashedLocalAssetRepository);
+    verifyZeroInteractions(mockAssetMediaRepository);
   });
 
   group('LocalSyncService - syncTrashedAssets gating', () {

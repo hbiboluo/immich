@@ -21,6 +21,126 @@ void main() {
     await ctx.dispose();
   });
 
+  group('replaceSnapshot', () {
+    test('android: moving to the first scanned album keeps the asset and removes the old link', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      final previous = LocalAlbum(id: 'old', name: 'Old', updatedAt: DateTime(2024));
+      final destination = LocalAlbum(id: 'new', name: 'New', updatedAt: DateTime(2024));
+      final asset = _localAsset('moved');
+      await sut.upsert(previous, toUpsert: [asset]);
+
+      await sut.replaceSnapshot(
+        [destination, previous],
+        {
+          destination.id: [asset],
+          previous.id: [],
+        },
+      );
+
+      expect(await sut.getAssetIds(destination.id), [asset.id]);
+      expect(await sut.getAssetIds(previous.id), isEmpty);
+      expect(await LocalAssetRepository(ctx.db).getById(asset.id), isNotNull);
+    });
+
+    test('android: moving from a missing album survives the final album cleanup', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      final previous = LocalAlbum(id: 'old', name: 'Old', updatedAt: DateTime(2024));
+      final destination = LocalAlbum(id: 'new', name: 'New', updatedAt: DateTime(2024));
+      final asset = _localAsset('moved');
+      await sut.upsert(previous, toUpsert: [asset]);
+
+      await sut.replaceSnapshot(
+        [destination],
+        {
+          destination.id: [asset],
+        },
+      );
+
+      expect(await sut.getAssetIds(destination.id), [asset.id]);
+      expect((await sut.getAll()).map((album) => album.id), [destination.id]);
+      expect(await LocalAssetRepository(ctx.db).getById(asset.id), isNotNull);
+    });
+
+    test('keeps the supplied backup selection and linked remote album while updating metadata', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      final user = await ctx.newUser();
+      final remote = await ctx.newRemoteAlbum(ownerId: user.id);
+      await ctx.newLocalAlbum(
+        id: 'camera',
+        name: 'Old camera',
+        backupSelection: BackupSelection.selected,
+        linkedRemoteAlbumId: remote.id,
+      );
+      final previous = (await sut.getAll()).single;
+      final snapshot = previous.copyWith(name: 'Renamed camera', updatedAt: DateTime(2026));
+
+      await sut.replaceSnapshot([snapshot], {snapshot.id: []});
+
+      final current = (await sut.getAll()).single;
+      expect(current.name, 'Renamed camera');
+      expect(current.updatedAt, DateTime(2026));
+      expect(current.backupSelection, BackupSelection.selected);
+      expect(current.linkedRemoteAlbumId, remote.id);
+    });
+
+    test('deletes missing assets and unselected albums while retaining saved album selections', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      for (final selection in BackupSelection.values) {
+        final album = LocalAlbum(
+          id: selection.name,
+          name: selection.name,
+          updatedAt: DateTime(2024),
+          backupSelection: selection,
+        );
+        await sut.upsert(album, toUpsert: [_localAsset(selection.name)]);
+      }
+
+      await sut.replaceSnapshot([], {});
+
+      final remaining = await sut.getAll();
+      expect(
+        remaining.map((album) => album.backupSelection),
+        unorderedEquals([BackupSelection.selected, BackupSelection.excluded]),
+      );
+      expect(remaining.every((album) => album.assetCount == 0), isTrue);
+      expect(await ctx.db.managers.localAssetEntity.count(), 0);
+      expect(await ctx.db.managers.localAlbumAssetEntity.count(), 0);
+    });
+
+    test('rejects an incomplete snapshot before changing any existing media', () async {
+      final album = LocalAlbum(id: 'camera', name: 'Camera', updatedAt: DateTime(2024));
+      await sut.upsert(album, toUpsert: [_localAsset('old')]);
+
+      expect(() => sut.replaceSnapshot([album], {}), throwsArgumentError);
+
+      expect(await sut.getAssetIds(album.id), ['old']);
+    });
+
+    test('a failed asset replacement rolls album metadata and deleted media back together', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      final album = LocalAlbum(id: 'camera', name: 'Camera', updatedAt: DateTime(2024));
+      await sut.upsert(album, toUpsert: [_localAsset('old')]);
+      await ctx.db.customStatement('''
+        CREATE TEMP TRIGGER reject_snapshot BEFORE INSERT ON local_asset_entity
+        BEGIN SELECT RAISE(ABORT, 'snapshot unavailable'); END
+      ''');
+
+      await expectLater(
+        sut.replaceSnapshot(
+          [album.copyWith(name: 'Renamed')],
+          {
+            album.id: [_localAsset('new')],
+          },
+        ),
+        throwsA(isA<Exception>()),
+      );
+
+      expect((await sut.getAll()).single.name, 'Camera');
+      expect(await sut.getAssetIds(album.id), ['old']);
+      expect(await LocalAssetRepository(ctx.db).getById('new'), isNull);
+    });
+  });
+
   group('upsert', () {
     final album = LocalAlbum(id: 'album', name: 'Camera', updatedAt: DateTime(2024));
 

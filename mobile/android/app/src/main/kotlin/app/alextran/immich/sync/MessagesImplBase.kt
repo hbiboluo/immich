@@ -1,8 +1,10 @@
 package app.alextran.immich.sync
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.ContentUris
 import android.content.Context
+import android.content.pm.PackageManager
 import android.database.Cursor
 import android.os.Build
 import android.os.Bundle
@@ -48,6 +50,26 @@ open class NativeSyncApiImplBase(context: Context) : ImmichPlugin(), ActivityAwa
   private var hashTask: Job? = null
   private var syncJob: Job? = null
   private val mediaTrashDelegate = MediaTrashDelegate(ctx)
+
+  open fun getMediaStoreVersion(): String {
+    check(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+      "Upload-once backup requires Android 10 or later"
+    }
+    val version = MediaStore.getVersion(ctx)
+    val volumes = MediaStore.getExternalVolumeNames(ctx).sorted().joinToString(",")
+    val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+      listOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO)
+    } else {
+      listOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+    }
+    val granted = permissions.joinToString(",") {
+      (ctx.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED).toString()
+    }
+    check(permissions.all { ctx.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }) {
+      "Upload-once backup requires full photo and video access"
+    }
+    return "$version:$volumes:$granted"
+  }
 
   companion object {
     private const val MAX_CONCURRENT_HASH_OPERATIONS = 16

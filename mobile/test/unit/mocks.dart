@@ -262,7 +262,7 @@ extension type const LocalAssetRepositoryStub(MockLocalAssetRepository repo) imp
       () => repo.reconcileHashesFromCloudId();
 
   Future<void> Function() get updateHashes =>
-      () => repo.updateHashes(any());
+      () => repo.updateHashes(any(), expectedUpdatedAt: any(named: 'expectedUpdatedAt'));
 
   Future<void> Function() get deleteAssets =>
       () => repo.deleteAssets(any());

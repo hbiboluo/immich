@@ -141,7 +141,10 @@ class HashService {
     if (isTrashed) {
       await _trashedLocalAssetRepository.updateHashes(hashed);
     } else {
-      await _localAssetRepository.updateHashes(hashed);
+      await _localAssetRepository.updateHashes(
+        hashed,
+        expectedUpdatedAt: {for (final id in hashed.keys) id: toHash[id]!.updatedAt},
+      );
     }
   }
 }

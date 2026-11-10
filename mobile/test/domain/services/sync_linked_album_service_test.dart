@@ -1,5 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:immich_mobile/domain/models/backup_policy.model.dart';
+import 'package:immich_mobile/domain/services/backup_policy_guard.service.dart';
 import 'package:immich_mobile/domain/services/sync_linked_album.service.dart';
 import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/store.provider.dart';
@@ -43,5 +45,28 @@ void main() {
     final service = rootContainer().read(syncLinkedAlbumServiceProvider);
 
     expect(service.manageLinkedAlbums(const [], 'user-1'), completes);
+  });
+  test('new-files mode does not refill linked server albums', () async {
+    final localAlbums = MockLocalAlbumRepository();
+    final remoteAlbums = MockRemoteAlbumRepository();
+    final albumApi = MockAlbumApiRepository();
+    final service = SyncLinkedAlbumService(
+      localAlbums,
+      remoteAlbums,
+      albumApi,
+      MockStoreService(),
+      backupPolicyGuard: BackupPolicyGuard(
+        getScope: () => 'scope',
+        getUserId: () => 'user',
+        getPolicy: (_) async => const BackupPolicy(scope: 'scope', status: BackupPolicyStatus.active),
+        getMediaStoreVersion: () async => 'v1',
+        pause: (_, {expectedRevision}) async {},
+      ),
+    );
+    await service.syncLinkedAlbums('user');
+    await service.manageLinkedAlbums([], 'user');
+    verifyZeroInteractions(localAlbums);
+    verifyZeroInteractions(remoteAlbums);
+    verifyZeroInteractions(albumApi);
   });
 }

@@ -5,6 +5,8 @@ import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/extensions/platform_extensions.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/presentation/actions/action.dart';
+import 'package:immich_mobile/providers/backup/backup_policy.provider.dart';
+import 'package:immich_mobile/providers/backup/backup_policy_guard.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/asset.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/store.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/toast.provider.dart';
@@ -57,9 +59,13 @@ class DeleteAction extends AssetActionBuilder {
       return null;
     }
 
+    final independent = ref.watch(backupPolicyProvider).valueOrNull?.onlyNew == true;
+    final hasRemote = ref.watch(_stateProvider(source).select((state) => state?.remoteIds.isNotEmpty == true));
     return .new(
       icon: Icons.delete_outline,
-      label: trash ? context.t.trash : context.t.delete,
+      label: independent
+          ? (hasRemote ? context.t.backup_delete_from_cloud : context.t.backup_delete_from_device)
+          : (trash ? context.t.trash : context.t.delete),
       onAction: () => _delete(context, ref),
     );
   }
@@ -70,7 +76,29 @@ class DeleteAction extends AssetActionBuilder {
       return;
     }
 
-    final (:localIds, :remoteIds, :trash, :isLocalOnly) = state;
+    final guard = ref.read(backupPolicyGuardProvider);
+    final scope = guard.getScope();
+    final policy = await guard.current();
+    if (!context.mounted || !guard.isCurrentScope(scope) || (scope != null && policy == null)) {
+      return;
+    }
+    final (:remoteIds, :trash) = (remoteIds: state.remoteIds, trash: state.trash);
+    final cloudOnly = policy?.onlyNew == true && remoteIds.isNotEmpty;
+    final localIds = cloudOnly ? <String>[] : state.localIds;
+    final isLocalOnly = !cloudOnly && state.isLocalOnly;
+    if (cloudOnly && state.isLocalOnly) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (_) => ConfirmDialog(
+          title: context.t.backup_delete_from_cloud,
+          content: context.t.backup_delete_cloud_only_mixed,
+          ok: context.t.delete,
+        ),
+      );
+      if (confirmed != true || !context.mounted) {
+        return;
+      }
+    }
     final assetService = ref.read(assetServiceProvider);
     final toastService = ref.read(toastServiceProvider);
     final clearSelection = ref.read(clearSelectionProvider(source));
@@ -85,7 +113,7 @@ class DeleteAction extends AssetActionBuilder {
         message = await _moveToTrash(context, ref, remoteIds, localIds, isLocalOnly: isLocalOnly);
         undo = .new(onUndo: () => assetService.restoreTrash(remoteIds));
       } else {
-        message = await _deletePermanently(context, ref, remoteIds, localIds);
+        message = await _deletePermanently(context, ref, remoteIds, localIds, cloudOnly: cloudOnly);
       }
 
       if (message == null) {
@@ -122,7 +150,7 @@ class DeleteAction extends AssetActionBuilder {
   }) async {
     final assetService = ref.read(assetServiceProvider);
     final message = context.t.trash_action_prompt(count: remoteIds.length);
-    if (localIds.isNotEmpty) {
+    if (localIds.isNotEmpty && (await ref.read(backupPolicyGuardProvider).allowsMediaManagement()) && context.mounted) {
       final count = await _cleanupLocalAssets(context, ref, localIds, isLocalOnly: isLocalOnly);
       if (count <= 0) {
         return null;
@@ -137,14 +165,15 @@ class DeleteAction extends AssetActionBuilder {
     BuildContext context,
     WidgetRef ref,
     List<String> remoteIds,
-    List<String> localIds,
-  ) async {
+    List<String> localIds, {
+    required bool cloudOnly,
+  }) async {
     final assetService = ref.read(assetServiceProvider);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (_) => ConfirmDialog(
         title: context.t.delete_dialog_title,
-        content: context.t.delete_dialog_alert,
+        content: cloudOnly ? context.t.backup_delete_cloud_only_confirmation : context.t.delete_dialog_alert,
         ok: context.t.delete_permanently,
       ),
     );
@@ -155,7 +184,7 @@ class DeleteAction extends AssetActionBuilder {
     final message = context.t.delete_permanently_action_prompt(count: remoteIds.length);
     // Server first, so a failed request will not remove the local copy
     await assetService.delete(remoteIds);
-    if (localIds.isNotEmpty && context.mounted) {
+    if (localIds.isNotEmpty && (await ref.read(backupPolicyGuardProvider).allowsMediaManagement()) && context.mounted) {
       await _cleanupLocalAssets(context, ref, localIds, requestCustomPrompt: false);
     }
 

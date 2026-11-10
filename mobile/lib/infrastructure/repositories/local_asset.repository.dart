@@ -58,7 +58,7 @@ class LocalAssetRepository extends DatabaseAccessor<Drift> with $LocalAssetRepos
 
   Stream<LocalAsset?> watch(String id) => _assetSelectable(id).watchSingleOrNull();
 
-  Future<void> updateHashes(Map<String, String> hashes) {
+  Future<void> updateHashes(Map<String, String> hashes, {Map<String, DateTime>? expectedUpdatedAt}) {
     if (hashes.isEmpty) {
       return Future.value();
     }
@@ -68,7 +68,10 @@ class LocalAssetRepository extends DatabaseAccessor<Drift> with $LocalAssetRepos
         batch.update(
           _db.localAssetEntity,
           LocalAssetEntityCompanion(checksum: Value(entry.value)),
-          where: (e) => e.id.equals(entry.key),
+          where: (e) {
+            final updatedAt = expectedUpdatedAt?[entry.key];
+            return e.id.equals(entry.key) & (updatedAt == null ? const Constant(true) : e.updatedAt.equals(updatedAt));
+          },
         );
       }
     });

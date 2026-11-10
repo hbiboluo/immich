@@ -118,6 +118,8 @@ class CloudIdResult {
 
 @HostApi()
 abstract class NativeSyncApi {
+  String getMediaStoreVersion();
+
   @async
   bool shouldFullSync();
 

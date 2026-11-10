@@ -63,6 +63,10 @@ class NativeSyncApiImpl: ImmichPlugin, NativeSyncApi, FlutterPlugin {
     defaults.set(data, forKey: changeTokenKey)
   }
   
+  func getMediaStoreVersion() throws -> String {
+    return "ios"
+  }
+
   func clearSyncCheckpoint() -> Void {
     defaults.removeObject(forKey: changeTokenKey)
   }

@@ -9,8 +9,10 @@ import 'package:immich_mobile/domain/services/sync_linked_album.service.dart';
 import 'package:immich_mobile/extensions/build_context_extensions.dart';
 import 'package:immich_mobile/extensions/platform_extensions.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
+import 'package:immich_mobile/presentation/widgets/backup/backup_policy_settings.widget.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
 import 'package:immich_mobile/providers/backup/backup_album.provider.dart';
+import 'package:immich_mobile/providers/backup/backup_policy.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/settings.provider.dart';
 import 'package:immich_mobile/providers/user.provider.dart';
@@ -23,6 +25,7 @@ class BackupSettings extends StatelessWidget {
   Widget build(BuildContext context) {
     return SettingsSubPageScaffold(
       settings: [
+        if (CurrentPlatform.isAndroid) ...[const BackupPolicySettings(), const Divider()],
         SettingGroupTitle(title: context.t.network_requirements, icon: Icons.cell_tower),
         const _UseCellularForVideosButton(),
         const _UseCellularForPhotosButton(),
@@ -88,6 +91,8 @@ class _AlbumSyncActionButtonState extends ConsumerState<_AlbumSyncActionButton> 
   @override
   Widget build(BuildContext context) {
     final albumSyncEnable = ref.watch(appConfigProvider.select((c) => c.backup.syncAlbums));
+    final policy = CurrentPlatform.isAndroid ? ref.watch(backupPolicyProvider).asData?.value : null;
+    final albumSyncAllowed = !CurrentPlatform.isAndroid || policy != null && !policy.onlyNew;
     return Padding(
       padding: const EdgeInsets.only(left: 8.0),
       child: ListView(
@@ -97,16 +102,20 @@ class _AlbumSyncActionButtonState extends ConsumerState<_AlbumSyncActionButton> 
             children: [
               SettingListTile(
                 title: context.t.sync_albums,
-                subtitle: context.t.sync_upload_album_setting_subtitle,
+                subtitle: albumSyncAllowed
+                    ? context.t.sync_upload_album_setting_subtitle
+                    : context.t.backup_upload_mode_albums_disabled,
                 trailing: Switch(
-                  value: albumSyncEnable,
-                  onChanged: (bool newValue) async {
-                    await ref.read(settingsProvider).write(.backupSyncAlbums, newValue);
+                  value: albumSyncAllowed && albumSyncEnable,
+                  onChanged: !albumSyncAllowed
+                      ? null
+                      : (bool newValue) async {
+                          await ref.read(settingsProvider).write(.backupSyncAlbums, newValue);
 
-                    if (newValue == true) {
-                      await _manageLinkedAlbums();
-                    }
-                  },
+                          if (newValue == true) {
+                            await _manageLinkedAlbums();
+                          }
+                        },
                 ),
               ),
               AnimatedSize(
@@ -114,8 +123,8 @@ class _AlbumSyncActionButtonState extends ConsumerState<_AlbumSyncActionButton> 
                 curve: Curves.easeInOut,
                 child: AnimatedOpacity(
                   duration: const Duration(milliseconds: 200),
-                  opacity: albumSyncEnable ? 1.0 : 0.0,
-                  child: albumSyncEnable
+                  opacity: albumSyncAllowed && albumSyncEnable ? 1.0 : 0.0,
+                  child: albumSyncAllowed && albumSyncEnable
                       ? SettingListTile(
                           onTap: _manualSyncAlbums,
                           contentPadding: const EdgeInsets.only(left: 32, right: 16),

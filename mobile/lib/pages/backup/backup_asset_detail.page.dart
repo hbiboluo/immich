@@ -5,11 +5,13 @@ import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/events.model.dart';
 import 'package:immich_mobile/domain/utils/event_stream.dart';
 import 'package:immich_mobile/extensions/build_context_extensions.dart';
+import 'package:immich_mobile/extensions/platform_extensions.dart';
 import 'package:immich_mobile/extensions/theme_extensions.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/pages/common/large_leading_tile.dart';
 import 'package:immich_mobile/presentation/widgets/images/thumbnail.widget.dart';
 import 'package:immich_mobile/providers/backup/backup.provider.dart';
+import 'package:immich_mobile/providers/backup/backup_policy.provider.dart';
 import 'package:immich_mobile/repositories/asset_media.repository.dart';
 import 'package:immich_mobile/routing/router.dart';
 
@@ -20,8 +22,11 @@ class BackupAssetDetailPage extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final AsyncValue<List<LocalAsset>> result = ref.watch(backupCandidateProvider);
+    final onlyNew = CurrentPlatform.isAndroid && ref.watch(backupPolicyProvider).asData?.value.onlyNew == true;
     return Scaffold(
-      appBar: AppBar(title: Text(context.t.backup_controller_page_remainder)),
+      appBar: AppBar(
+        title: Text(onlyNew ? context.t.backup_upload_mode_pending : context.t.backup_controller_page_remainder),
+      ),
       body: result.when(
         data: (List<LocalAsset> candidates) {
           return ListView.separated(

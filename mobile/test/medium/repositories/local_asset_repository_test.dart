@@ -1,5 +1,7 @@
+import 'package:drift/drift.dart' hide isNotNull, isNull;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:immich_mobile/constants/enums.dart';
+import 'package:immich_mobile/data/db/main/table/local/asset.drift.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/infrastructure/repositories/local_asset.repository.dart';
 import 'package:immich_mobile/utils/option.dart';
@@ -17,6 +19,46 @@ void main() {
 
   tearDown(() async {
     await ctx.dispose();
+  });
+
+  group('updateHashes', () {
+    test('stores a hash while the scanned asset version is unchanged', () async {
+      final scannedAt = DateTime.utc(2026, 11, 10, 12);
+      final asset = await ctx.newLocalAsset(updatedAt: scannedAt, checksumOption: const Option.none());
+      await sut.updateHashes({asset.id: 'fresh-hash'}, expectedUpdatedAt: {asset.id: scannedAt});
+      expect((await sut.getById(asset.id))!.checksum, 'fresh-hash');
+    });
+
+    test('rejects a stale hash after the local file was edited during hashing', () async {
+      final scannedAt = DateTime.utc(2026, 11, 10, 12);
+      final editedAt = scannedAt.add(const Duration(seconds: 1));
+      final asset = await ctx.newLocalAsset(updatedAt: scannedAt, checksumOption: const Option.none());
+      await (ctx.db.update(
+        ctx.db.localAssetEntity,
+      )..where((a) => a.id.equals(asset.id))).write(LocalAssetEntityCompanion(updatedAt: Value(editedAt)));
+      await sut.updateHashes({asset.id: 'stale-hash'}, expectedUpdatedAt: {asset.id: scannedAt});
+      final result = await sut.getById(asset.id);
+      expect(result!.checksum, isNull);
+      expect(result.updatedAt, editedAt);
+    });
+
+    test('accepts valid batch entries without replacing an edited sibling hash', () async {
+      final scannedAt = DateTime.utc(2026, 11, 10, 12);
+      final stable = await ctx.newLocalAsset(updatedAt: scannedAt, checksumOption: const Option.none());
+      final edited = await ctx.newLocalAsset(updatedAt: scannedAt.add(const Duration(seconds: 1)), checksum: 'current');
+      await sut.updateHashes(
+        {stable.id: 'stable-hash', edited.id: 'stale-hash'},
+        expectedUpdatedAt: {stable.id: scannedAt, edited.id: scannedAt},
+      );
+      expect((await sut.getById(stable.id))!.checksum, 'stable-hash');
+      expect((await sut.getById(edited.id))!.checksum, 'current');
+    });
+
+    test('retains the unconditional legacy API when no expected version is provided', () async {
+      final asset = await ctx.newLocalAsset(checksumOption: const Option.none());
+      await sut.updateHashes({asset.id: 'legacy-hash'});
+      expect((await sut.getById(asset.id))!.checksum, 'legacy-hash');
+    });
   });
 
   group('get', () {

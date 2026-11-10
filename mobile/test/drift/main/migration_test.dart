@@ -4,6 +4,7 @@ import 'package:drift/drift.dart';
 import 'package:drift_dev/api/migrations_native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:immich_mobile/data/db/main/database.dart';
+import 'package:immich_mobile/domain/models/backup_policy.model.dart';
 import 'package:immich_mobile/domain/models/timeline.model.dart';
 import 'package:immich_mobile/infrastructure/repositories/timeline.repository.dart';
 import 'package:immich_mobile/utils/migration.dart';
@@ -92,4 +93,36 @@ void main() {
       },
     );
   });
+
+  test(
+    'v36 preserves local files and defaults existing installations to legacy backup',
+    () async {
+      final schema = await verifier.schemaAt(35);
+      schema.rawDatabase.execute('''
+      INSERT INTO local_album_entity (id, name, backup_selection) VALUES ('camera', 'Camera', 0);
+      INSERT INTO local_asset_entity (id, name, type, checksum) VALUES ('existing', 'existing.jpg', 1, 'content');
+      INSERT INTO local_album_asset_entity (asset_id, album_id) VALUES ('existing', 'camera');
+    ''');
+      final db = Drift(schema.newConnection());
+      await verifier.migrateAndValidate(db, 36);
+      final policy = await db.backupPolicyRepository.getPolicy('server-user');
+      expect(policy.status, BackupPolicyStatus.legacy);
+      expect(
+        (await db.backupRepository.getCandidates(
+          'user-1',
+          scope: 'server-user',
+        )).single.id,
+        'existing',
+      );
+      final history = await db
+          .customSelect('SELECT COUNT(*) AS count FROM backup_history_entity')
+          .getSingle();
+      expect(history.read<int>('count'), 0);
+      final foreignKeys = await db
+          .customSelect('PRAGMA foreign_key_list(backup_history_entity)')
+          .get();
+      expect(foreignKeys, isEmpty);
+      await db.close();
+    },
+  );
 }

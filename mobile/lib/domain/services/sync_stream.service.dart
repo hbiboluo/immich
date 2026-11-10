@@ -7,6 +7,7 @@ import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/domain/models/server_capability.model.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/domain/models/sync_event.model.dart';
+import 'package:immich_mobile/domain/services/backup_policy_guard.service.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/extensions/platform_extensions.dart';
 import 'package:immich_mobile/infrastructure/repositories/local_asset.repository.dart';
@@ -41,6 +42,7 @@ class SyncStreamService {
   final SyncMigrationRepository _syncMigrationRepository;
   final ApiService _api;
   final Completer<void>? _cancellation;
+  final BackupPolicyGuard? _backupPolicyGuard;
 
   SyncStreamService({
     required this._syncApiRepository,
@@ -52,6 +54,7 @@ class SyncStreamService {
     required this._syncMigrationRepository,
     required this._api,
     this._cancellation,
+    this._backupPolicyGuard,
   });
 
   bool get isCancelled => _cancellation?.isCompleted ?? false;
@@ -505,6 +508,9 @@ class SyncStreamService {
   }
 
   Future<void> _handleRemoteDeleted(Iterable<String> remoteIds) async {
+    if (!(await _backupPolicyGuard?.allowsMediaManagement() ?? true)) {
+      return;
+    }
     if (remoteIds.isEmpty) {
       return Future.value();
     } else {
@@ -520,6 +526,9 @@ class SyncStreamService {
   Future<void> _trashLocalAssets(Map<String, List<LocalAsset>> localAssetsToTrash) async {
     final localIds = localAssetsToTrash.values.expand((assets) => assets).map((asset) => asset.id).toList();
     _logger.info("Moving to trash ${localIds.join(", ")} assets");
+    if (!(await _backupPolicyGuard?.allowsMediaManagement() ?? true)) {
+      return;
+    }
     final movedIds = await _assetMediaRepository.deleteAll(localIds);
     if (movedIds.isNotEmpty) {
       final movedAssetsByAlbum = localAssetsToTrash.map(
@@ -531,8 +540,11 @@ class SyncStreamService {
   }
 
   Future<void> _applyRemoteRestoreToLocal() async {
+    if (!(await _backupPolicyGuard?.allowsMediaManagement() ?? true)) {
+      return;
+    }
     final assetsToRestore = await _trashedLocalAssetRepository.getToRestore();
-    if (assetsToRestore.isNotEmpty) {
+    if (assetsToRestore.isNotEmpty && (await _backupPolicyGuard?.allowsMediaManagement() ?? true)) {
       final restoredIds = await _assetMediaRepository.restoreAssetsFromTrash(assetsToRestore);
       await _trashedLocalAssetRepository.applyRestoredAssets(restoredIds);
     } else {

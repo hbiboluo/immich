@@ -136,6 +136,53 @@ class LocalAlbumRepository extends DatabaseAccessor<Drift> with $LocalAlbumRepos
     });
   }
 
+  Future<void> replaceSnapshot(List<LocalAlbum> albums, Map<String, List<LocalAsset>> assetsByAlbum) {
+    final albumIds = albums.map((album) => album.id).toSet();
+    if (albumIds.length != albums.length ||
+        assetsByAlbum.length != albumIds.length ||
+        !assetsByAlbum.keys.every(albumIds.contains)) {
+      throw ArgumentError('A complete asset snapshot is required for every album');
+    }
+    final assets = <String, LocalAsset>{};
+    final assetAlbums = <String, List<String>>{};
+    for (final entry in assetsByAlbum.entries) {
+      for (final asset in entry.value) {
+        assets[asset.id] = asset;
+        (assetAlbums[asset.id] ??= []).add(entry.key);
+      }
+    }
+
+    return _db.transaction(() async {
+      final previousAlbums = await (_db.localAlbumEntity.selectOnly()..addColumns([_db.localAlbumEntity.id]))
+          .map((row) => row.read(_db.localAlbumEntity.id)!)
+          .get();
+      await _db.batch((batch) {
+        for (final album in albums) {
+          final companion = LocalAlbumEntityCompanion.insert(
+            id: album.id,
+            name: album.name,
+            updatedAt: Value(album.updatedAt),
+            backupSelection: album.backupSelection,
+            isIosSharedAlbum: Value(album.isIosSharedAlbum),
+            linkedRemoteAlbumId: Value(album.linkedRemoteAlbumId),
+          );
+          batch.insert(_db.localAlbumEntity, companion, onConflict: DoUpdate((_) => companion));
+        }
+      });
+      final previousAssets = await (_db.localAssetEntity.selectOnly()..addColumns([_db.localAssetEntity.id]))
+          .map((row) => row.read(_db.localAssetEntity.id)!)
+          .get();
+      await processDelta(
+        updates: assets.values.toList(),
+        deletes: previousAssets.where((id) => !assets.containsKey(id)).toList(),
+        assetAlbums: assetAlbums,
+      );
+      for (final id in previousAlbums.where((id) => !albumIds.contains(id))) {
+        await deleteAlbum(id);
+      }
+    });
+  }
+
   Future<void> updateAll(Iterable<LocalAlbum> albums) {
     return _db.transaction(() async {
       await _db.localAlbumEntity.update().write(const LocalAlbumEntityCompanion(marker_: Value(true)));

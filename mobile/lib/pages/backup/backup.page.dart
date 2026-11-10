@@ -10,10 +10,12 @@ import 'package:immich_mobile/extensions/build_context_extensions.dart';
 import 'package:immich_mobile/extensions/platform_extensions.dart';
 import 'package:immich_mobile/extensions/theme_extensions.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
+import 'package:immich_mobile/presentation/widgets/backup/backup_policy_summary.widget.dart';
 import 'package:immich_mobile/presentation/widgets/backup/backup_toggle_button.widget.dart';
 import 'package:immich_mobile/providers/background_sync.provider.dart';
 import 'package:immich_mobile/providers/backup/backup.provider.dart';
 import 'package:immich_mobile/providers/backup/backup_album.provider.dart';
+import 'package:immich_mobile/providers/backup/backup_policy.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/settings.provider.dart';
 import 'package:immich_mobile/providers/permission.provider.dart';
 import 'package:immich_mobile/providers/sync_status.provider.dart';
@@ -132,6 +134,7 @@ class _BackupPageState extends ConsumerState<BackupPage> {
               children: [
                 const SizedBox(height: 8),
                 const _BackupAlbumSelectionCard(),
+                if (CurrentPlatform.isAndroid) const BackupPolicyStatusBanner(),
                 if (selectedAlbum.isNotEmpty) ...[
                   const _TotalCard(),
                   const _BackupCard(),
@@ -434,6 +437,20 @@ class _BackupCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    if (CurrentPlatform.isAndroid) {
+      final policy = ref.watch(backupPolicyProvider);
+      if (policy.isLoading) {
+        return const Card(
+          child: Padding(padding: EdgeInsets.all(20), child: LinearProgressIndicator()),
+        );
+      }
+      if (policy.hasError) {
+        return Card(child: ListTile(title: Text(context.t.backup_upload_mode_error)));
+      }
+      if (policy.asData?.value.onlyNew == true) {
+        return const BackupPolicyHistoryCard();
+      }
+    }
     final backupCount = ref.watch(backupProvider.select((p) => p.backupCount));
     final syncStatus = ref.watch(syncStatusProvider);
 
@@ -453,6 +470,7 @@ class _RemainderCard extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final remainderCount = ref.watch(backupProvider.select((p) => p.remainderCount));
     final syncStatus = ref.watch(syncStatusProvider);
+    final onlyNew = CurrentPlatform.isAndroid && ref.watch(backupPolicyProvider).asData?.value.onlyNew == true;
 
     return Card(
       shape: RoundedRectangleBorder(
@@ -466,11 +484,16 @@ class _RemainderCard extends ConsumerWidget {
           ListTile(
             minVerticalPadding: 18,
             isThreeLine: true,
-            title: Text(context.t.backup_controller_page_remainder, style: context.textTheme.titleMedium),
+            title: Text(
+              onlyNew ? context.t.backup_upload_mode_pending : context.t.backup_controller_page_remainder,
+              style: context.textTheme.titleMedium,
+            ),
             subtitle: Padding(
               padding: const EdgeInsets.only(top: 4.0, right: 18.0),
               child: Text(
-                context.t.backup_controller_page_remainder_sub,
+                onlyNew
+                    ? context.t.backup_upload_mode_pending_description
+                    : context.t.backup_controller_page_remainder_sub,
                 style: context.textTheme.bodyMedium?.copyWith(color: context.colorScheme.onSurfaceSecondary),
               ),
             ),

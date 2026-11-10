@@ -5,11 +5,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
+import 'package:immich_mobile/domain/models/backup_policy.model.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
+import 'package:immich_mobile/domain/services/backup_policy_guard.service.dart';
 import 'package:immich_mobile/domain/services/store.service.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/presentation/actions/action.widget.dart';
 import 'package:immich_mobile/presentation/actions/delete.action.dart';
+import 'package:immich_mobile/providers/backup/backup_policy.provider.dart';
+import 'package:immich_mobile/providers/backup/backup_policy_guard.provider.dart';
 import 'package:immich_mobile/providers/server_info.provider.dart';
 import 'package:immich_mobile/widgets/common/confirm_dialog.dart';
 import 'package:immich_ui/immich_ui.dart';
@@ -45,7 +49,29 @@ void main() {
         localId: localId,
       );
 
-  Future<void> pumpDelete(WidgetTester tester, Set<BaseAsset> selection, {bool trashEnabled = true}) async {
+  List<Override> onlyNewOverrides() {
+    const policy = BackupPolicy(scope: 'server:user', status: BackupPolicyStatus.active, mediaStoreVersion: 'media-1');
+    return [
+      backupPolicyProvider.overrideWith((ref) => Stream.value(policy)),
+      backupPolicyGuardProvider.overrideWithValue(
+        BackupPolicyGuard(
+          getScope: () => policy.scope,
+          getUserId: () => context.currentUser.id,
+          getPolicy: (scope) async => policy,
+          getMediaStoreVersion: () async => 'media-1',
+          pause: (scope, {expectedRevision}) async {},
+        ),
+      ),
+    ];
+  }
+
+  Future<void> pumpDelete(
+    WidgetTester tester,
+    Set<BaseAsset> selection, {
+    bool trashEnabled = true,
+    bool onlyNew = false,
+    BackupPolicyGuard? guard,
+  }) async {
     if (!trashEnabled) {
       when(
         () => context.service.serverInfo.getServerFeatures(),
@@ -55,7 +81,11 @@ void main() {
     await tester.pumpTestWidget(
       context,
       const ActionIconButton(action: DeleteAction(source: .timeline)),
-      overrides: context.selected(selection),
+      overrides: [
+        ...context.selected(selection),
+        if (onlyNew) ...onlyNewOverrides(),
+        if (guard != null) backupPolicyGuardProvider.overrideWithValue(guard),
+      ],
     );
 
     if (!trashEnabled) {
@@ -241,6 +271,112 @@ void main() {
       });
     });
 
+    group('only new files', () {
+      testWidgets('trashes a merged server asset without removing its device copy', (tester) async {
+        final asset = owned(localId: 'local');
+
+        await pumpDelete(tester, {asset}, onlyNew: true);
+        await tester.pumpAndSettle();
+
+        verify(() => assetService.trash([asset.id])).called(1);
+        verifyNever(() => cleanupService.deleteLocalAssets(any()));
+        verifyNever(() => assetService.delete(any()));
+      });
+
+      testWidgets('permanently deletes only the server copy of a merged asset', (tester) async {
+        final asset = owned(localId: 'local');
+
+        await pumpDelete(tester, {asset}, onlyNew: true, trashEnabled: false);
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(find.text(StaticTranslations.instance.backup_delete_cloud_only_confirmation), findsOneWidget);
+        await respondToDialog(tester, confirm: true);
+
+        verify(() => assetService.delete([asset.id])).called(1);
+        verifyNever(() => cleanupService.deleteLocalAssets(any()));
+        verifyNever(() => assetService.trash(any()));
+      });
+
+      testWidgets('preserves the device copy when only-new mode starts during permanent-delete confirmation', (
+        tester,
+      ) async {
+        final asset = owned(localId: 'local');
+        var policy = const BackupPolicy(scope: 'server:user');
+        final guard = BackupPolicyGuard(
+          getScope: () => policy.scope,
+          getUserId: () => context.currentUser.id,
+          getPolicy: (scope) async => policy,
+          getMediaStoreVersion: () async => 'media-1',
+          pause: (scope, {expectedRevision}) async {},
+        );
+
+        await pumpDelete(tester, {asset}, trashEnabled: false, guard: guard);
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(find.text(StaticTranslations.instance.delete_dialog_alert), findsOneWidget);
+        verifyNever(() => assetService.delete(any()));
+        verifyNever(() => cleanupService.deleteLocalAssets(any()));
+
+        policy = const BackupPolicy(
+          scope: 'server:user',
+          status: BackupPolicyStatus.active,
+          mediaStoreVersion: 'media-1',
+        );
+        await respondToDialog(tester, confirm: true);
+
+        verify(() => assetService.delete([asset.id])).called(1);
+        verifyNever(() => cleanupService.deleteLocalAssets(any()));
+        verifyNever(() => assetService.trash(any()));
+      });
+
+      testWidgets('explains mixed selections and leaves device-only items untouched', (tester) async {
+        final server = owned(localId: 'server-local');
+        final device = LocalAssetFactory.create();
+
+        await pumpDelete(tester, {server, device}, onlyNew: true);
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(find.text(StaticTranslations.instance.backup_delete_cloud_only_mixed), findsOneWidget);
+        await respondToDialog(tester, confirm: true);
+
+        verify(() => assetService.trash([server.id])).called(1);
+        verifyNever(() => cleanupService.deleteLocalAssets(any()));
+      });
+
+      testWidgets('cancelling the mixed-selection prompt keeps both copies', (tester) async {
+        final server = owned(localId: 'server-local');
+        final device = LocalAssetFactory.create();
+
+        await pumpDelete(tester, {server, device}, onlyNew: true);
+        await respondToDialog(tester, confirm: false);
+
+        verifyNever(() => assetService.trash(any()));
+        verifyNever(() => assetService.delete(any()));
+        verifyNever(() => cleanupService.deleteLocalAssets(any()));
+      });
+
+      testWidgets('still permits an explicit device-only deletion', (tester) async {
+        final device = LocalAssetFactory.create();
+        when(() => cleanupService.deleteLocalAssets([device.id])).thenAnswer((_) async => 1);
+
+        await pumpDelete(tester, {device}, onlyNew: true);
+        await tester.pumpAndSettle();
+
+        verify(() => cleanupService.deleteLocalAssets([device.id])).called(1);
+        verifyNever(() => assetService.trash(any()));
+        verifyNever(() => assetService.delete(any()));
+      });
+
+      testWidgets('undo restores only the server asset', (tester) async {
+        final asset = owned(localId: 'local');
+
+        await pumpDelete(tester, {asset}, onlyNew: true);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Undo'));
+        await tester.pump();
+
+        verify(() => assetService.restoreTrash([asset.id])).called(1);
+        verifyNever(() => cleanupService.deleteLocalAssets(any()));
+      });
+    });
+
     group('local only', () {
       testWidgets('removes the device copy with no remote call', (tester) async {
         final asset = LocalAssetFactory.create();
@@ -370,6 +506,25 @@ void main() {
   });
 
   group('CleanupLocalAction', () {
+    testWidgets('keeps explicit device cleanup available in only-new-files mode', (tester) async {
+      final backedUp = LocalAssetFactory.create(remoteId: 'remote');
+      when(() => cleanupService.deleteLocalAssets([backedUp.id])).thenAnswer((_) async => 1);
+
+      await tester.pumpTestAction(
+        context,
+        const CleanupLocalAction(source: .timeline),
+        overrides: [
+          ...context.selected({backedUp}),
+          ...onlyNewOverrides(),
+        ],
+      );
+      await tester.pumpAndSettle();
+
+      verify(() => cleanupService.deleteLocalAssets([backedUp.id])).called(1);
+      verifyNever(() => assetService.trash(any()));
+      verifyNever(() => assetService.delete(any()));
+    });
+
     testWidgets('deletes only backed up device copies', (tester) async {
       final backedUp = LocalAssetFactory.create(remoteId: 'remote');
       final localOnly = LocalAssetFactory.create();

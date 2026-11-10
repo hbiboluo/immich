@@ -6,22 +6,27 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/domain/models/asset/asset_metadata.model.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart' hide AssetVisibility;
+import 'package:immich_mobile/domain/models/backup_policy.model.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/domain/services/asset.service.dart';
+import 'package:immich_mobile/domain/services/backup_policy_guard.service.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/extensions/network_capability_extensions.dart';
 import 'package:immich_mobile/extensions/platform_extensions.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/infrastructure/repositories/backup.repository.dart';
+import 'package:immich_mobile/infrastructure/repositories/backup_policy.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/storage.repository.dart';
 import 'package:immich_mobile/platform/connectivity_api.g.dart';
+import 'package:immich_mobile/providers/backup/backup_policy_guard.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/asset.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/storage.provider.dart';
 import 'package:immich_mobile/repositories/asset_media.repository.dart';
 import 'package:immich_mobile/repositories/upload.repository.dart';
+import 'package:immich_mobile/utils/async_mutex.dart';
 import 'package:logging/logging.dart';
 import 'package:openapi/api.dart';
 import 'package:path/path.dart' as p;
@@ -46,6 +51,8 @@ final foregroundUploadServiceProvider = Provider((ref) {
     ref.watch(connectivityApiProvider),
     ref.watch(assetMediaRepositoryProvider),
     ref.watch(assetServiceProvider),
+    backupPolicyRepository: ref.watch(driftProvider).backupPolicyRepository,
+    backupPolicyGuard: ref.watch(backupPolicyGuardProvider),
   );
 });
 
@@ -61,8 +68,10 @@ class ForegroundUploadService {
     this._backupRepository,
     this._connectivityApi,
     this._assetMediaRepository,
-    this._assetService,
-  );
+    this._assetService, {
+    this._backupPolicyRepository,
+    this._backupPolicyGuard,
+  });
 
   final UploadRepository _uploadRepository;
   final StorageRepository _storageRepository;
@@ -70,16 +79,41 @@ class ForegroundUploadService {
   final ConnectivityApi _connectivityApi;
   final AssetMediaRepository _assetMediaRepository;
   final AssetService _assetService;
+  final BackupPolicyRepository? _backupPolicyRepository;
+  final BackupPolicyGuard? _backupPolicyGuard;
   final Logger _logger = Logger('ForegroundUploadService');
 
   bool shouldAbortUpload = false;
+  final _backupMutex = AsyncMutex();
+  Future<void>? _backupTask;
+  Completer<void>? _backupCancellation;
 
-  Future<({int total, int remainder, int processing})> getBackupCounts(String userId) {
-    return _backupRepository.getAllCounts(userId);
+  Future<({int total, int remainder, int processing})> getBackupCounts(String userId) async {
+    final scope = _backupPolicyGuard?.getScope();
+    final policy = await _backupPolicyGuard?.current(validateMediaStore: true);
+    if (_backupPolicyGuard != null &&
+        (!_backupPolicyGuard.isCurrentUser(userId) ||
+            !_backupPolicyGuard.isCurrentScope(scope) ||
+            (scope != null && policy == null))) {
+      return (total: 0, remainder: 0, processing: 0);
+    }
+    return policy == null
+        ? _backupRepository.getAllCounts(userId)
+        : _backupRepository.getAllCounts(userId, scope: policy.scope);
   }
 
-  Future<List<LocalAsset>> getBackupCandidates(String userId, {bool onlyHashed = true}) {
-    return _backupRepository.getCandidates(userId, onlyHashed: onlyHashed);
+  Future<List<LocalAsset>> getBackupCandidates(String userId, {bool onlyHashed = true}) async {
+    final scope = _backupPolicyGuard?.getScope();
+    final policy = await _backupPolicyGuard?.current(validateMediaStore: true);
+    if (_backupPolicyGuard != null &&
+        (!_backupPolicyGuard.isCurrentUser(userId) ||
+            !_backupPolicyGuard.isCurrentScope(scope) ||
+            (scope != null && policy == null))) {
+      return [];
+    }
+    return policy == null
+        ? _backupRepository.getCandidates(userId, onlyHashed: onlyHashed)
+        : _backupRepository.getCandidates(userId, onlyHashed: onlyHashed, scope: policy.scope);
   }
 
   /// Bulk upload of backup candidates from selected albums
@@ -89,6 +123,76 @@ class ForegroundUploadService {
     UploadCallbacks callbacks = const UploadCallbacks(),
     bool useSequentialUpload = false,
   }) async {
+    final started = await _backupMutex.run(() async {
+      final previous = _backupTask;
+      if (previous != null) {
+        _cancelBackup();
+        await previous;
+      }
+      if (cancelToken.isCompleted) {
+        return (task: Future<void>.value());
+      }
+      final cancellation = Completer<void>();
+      _backupCancellation = cancellation;
+      unawaited(
+        cancelToken.future.then((_) {
+          if (!cancellation.isCompleted) {
+            cancellation.complete();
+          }
+        }),
+      );
+      final task = _runBackup(userId, cancellation, callbacks, useSequentialUpload);
+      _backupTask = task;
+      return (task: task);
+    });
+    final task = started.task;
+    try {
+      await task;
+    } finally {
+      if (identical(_backupTask, task)) {
+        _backupTask = null;
+        _backupCancellation = null;
+      }
+    }
+  }
+
+  void _cancelBackup() {
+    shouldAbortUpload = true;
+    final cancellation = _backupCancellation;
+    if (cancellation != null && !cancellation.isCompleted) {
+      cancellation.complete();
+    }
+  }
+
+  Future<void> cancelAndWait() async {
+    final stopped = await _backupMutex.run(() async {
+      _cancelBackup();
+      return (task: _backupTask);
+    });
+    await stopped.task;
+  }
+
+  Future<void> _runBackup(
+    String userId,
+    Completer<void> cancelToken,
+    UploadCallbacks callbacks,
+    bool useSequentialUpload,
+  ) async {
+    shouldAbortUpload = false;
+    final scope = _backupPolicyGuard?.getScope();
+    final policy = await _backupPolicyGuard?.current(validateMediaStore: true);
+    if (policy?.isPaused == true ||
+        (_backupPolicyGuard != null &&
+            (!_backupPolicyGuard.isCurrentUser(userId) ||
+                !_backupPolicyGuard.isCurrentScope(scope) ||
+                (scope != null && policy == null))) ||
+        cancelToken.isCompleted) {
+      return;
+    }
+    if (policy != null) {
+      await _uploadBatches(userId, policy, cancelToken, callbacks, useSequentialUpload);
+      return;
+    }
     final candidates = await _backupRepository.getCandidates(userId);
     if (candidates.isEmpty) {
       return;
@@ -109,6 +213,68 @@ class ForegroundUploadService {
           return requireWifi && !hasWifi;
         },
         processItem: (asset) => uploadSingleAsset(asset, cancelToken, callbacks: callbacks),
+      );
+    }
+  }
+
+  Future<void> _uploadBatches(
+    String userId,
+    BackupPolicy policy,
+    Completer<void> cancelToken,
+    UploadCallbacks callbacks,
+    bool useSequentialUpload,
+  ) async {
+    final guard = _backupPolicyGuard!;
+    String? afterId;
+    while (!cancelToken.isCompleted && !shouldAbortUpload) {
+      final current = await guard.current(validateMediaStore: true);
+      if (current == null || current.isPaused || current.scope != policy.scope || current.revision != policy.revision) {
+        return;
+      }
+      final candidates = await _backupRepository.getCandidates(
+        userId,
+        scope: policy.scope,
+        limit: 200,
+        afterId: afterId,
+      );
+      if (candidates.isEmpty || cancelToken.isCompleted) {
+        return;
+      }
+      afterId = candidates.last.id;
+      final network = await _connectivityApi.getCapabilities();
+      await _executeWithWorkerPool<LocalAsset>(
+        items: candidates,
+        cancelToken: cancelToken,
+        concurrentWorkers: useSequentialUpload ? 1 : 3,
+        processItem: (asset) async {
+          if (_shouldRequireWiFi(asset) && !network.isUnmetered) {
+            return;
+          }
+          final latest = await guard.current();
+          if (latest == null ||
+              latest.isPaused ||
+              latest.scope != policy.scope ||
+              latest.revision != policy.revision ||
+              !guard.isCurrentUser(userId) ||
+              cancelToken.isCompleted) {
+            return;
+          }
+          if (policy.onlyNew && await _backupPolicyRepository!.hasProcessed(policy.scope, asset.id)) {
+            return;
+          }
+          final refreshed = await _assetService.getLocalAsset(asset.id);
+          if (refreshed == null || refreshed.updatedAt != asset.updatedAt || refreshed.checksum != asset.checksum) {
+            return;
+          }
+          await uploadSingleAsset(
+            asset,
+            cancelToken,
+            callbacks: callbacks,
+            historyScope: policy.scope,
+            historyEpoch: policy.mediaStoreEpoch,
+            historyRevision: policy.revision,
+          );
+        },
       );
     }
   }
@@ -190,7 +356,7 @@ class ForegroundUploadService {
   }
 
   void cancel() {
-    shouldAbortUpload = true;
+    _cancelBackup();
   }
 
   /// Generic worker pool for concurrent uploads
@@ -247,6 +413,9 @@ class ForegroundUploadService {
     LocalAsset asset,
     Completer<void>? cancelToken, {
     required UploadCallbacks callbacks,
+    String? historyScope,
+    int? historyEpoch,
+    int? historyRevision,
   }) async {
     final t = StaticTranslations.instance;
     final assetNotFoundOnDevice = CurrentPlatform.isAndroid
@@ -256,9 +425,19 @@ class ForegroundUploadService {
     File? livePhotoFile;
 
     try {
+      if (cancelToken?.isCompleted ?? false) {
+        return;
+      }
+      historyScope ??= _backupPolicyGuard?.getScope();
+      final historyPolicy = historyScope == null ? null : await _backupPolicyRepository?.getPolicy(historyScope);
+      historyEpoch ??= historyPolicy?.mediaStoreEpoch;
+      final requireCompleteAsset = historyPolicy?.onlyNew ?? false;
       final remoteId = (await _assetService.getLocalAsset(asset.id))?.remoteId;
       if (remoteId != null) {
-        await _handleUploadSuccess(asset, remoteId, callbacks);
+        if (!await _canSend(historyScope, historyRevision, asset: asset)) {
+          return;
+        }
+        await _handleUploadSuccess(asset, remoteId, callbacks, historyScope, historyEpoch, uploaded: false);
         return;
       }
 
@@ -308,10 +487,17 @@ class ForegroundUploadService {
           if (livePhotoFile == null) {
             _logger.warning("Failed to obtain motion part of the livePhoto - ${asset.name}");
             callbacks.onError?.call(asset.localId!, assetNotFoundOnDevice);
+            if (requireCompleteAsset) {
+              return;
+            }
           }
         }
       }
 
+      if (requireCompleteAsset && entity.isLivePhoto && livePhotoFile == null) {
+        callbacks.onError?.call(asset.localId!, assetNotFoundOnDevice);
+        return;
+      }
       if (file == null) {
         _logger.warning("Failed to obtain file from iCloud for asset ${asset.id} - ${asset.name}");
         callbacks.onError?.call(asset.localId!, t.asset_not_found_on_icloud);
@@ -323,6 +509,10 @@ class ForegroundUploadService {
       final extension = p.extension(file.path).isNotEmpty ? p.extension(file.path) : p.extension(asset.name);
       final originalFileName = p.setExtension(fileName, extension);
       final deviceId = Store.get(StoreKey.deviceId);
+
+      if ((cancelToken?.isCompleted ?? false) || !await _canSend(historyScope, historyRevision, asset: asset)) {
+        return;
+      }
 
       final fields = {
         // deviceAssetId/deviceId required by server v2.7.5 and below (drop in v4.0 per #27818).
@@ -354,6 +544,13 @@ class ForegroundUploadService {
 
         if (livePhotoResult.isSuccess && livePhotoResult.remoteAssetId != null) {
           livePhotoVideoId = livePhotoResult.remoteAssetId;
+        } else if (requireCompleteAsset) {
+          if (livePhotoResult.isCancelled) {
+            shouldAbortUpload = true;
+          } else {
+            callbacks.onError?.call(asset.localId!, livePhotoResult.errorMessage ?? assetNotFoundOnDevice);
+          }
+          return;
         }
       }
 
@@ -378,6 +575,9 @@ class ForegroundUploadService {
       }
 
       final onProgress = callbacks.onProgress;
+      if ((cancelToken?.isCompleted ?? false) || !await _canSend(historyScope, historyRevision, asset: asset)) {
+        return;
+      }
       final result = await _uploadRepository.uploadFile(
         file: file,
         originalFileName: originalFileName,
@@ -390,7 +590,7 @@ class ForegroundUploadService {
       );
 
       if (result.isSuccess && result.remoteAssetId != null) {
-        await _handleUploadSuccess(asset, result.remoteAssetId!, callbacks);
+        await _handleUploadSuccess(asset, result.remoteAssetId!, callbacks, historyScope, historyEpoch);
       } else if (result.isCancelled) {
         shouldAbortUpload = true;
       } else if (result.errorMessage != null) {
@@ -421,8 +621,52 @@ class ForegroundUploadService {
     }
   }
 
-  Future<void> _handleUploadSuccess(LocalAsset asset, String remoteId, UploadCallbacks callbacks) async {
+  Future<bool> _canSend(String? scope, int? revision, {required LocalAsset asset}) async {
+    if (scope == null) {
+      return true;
+    }
+    if (!(_backupPolicyGuard?.isCurrentScope(scope) ?? true)) {
+      return false;
+    }
+    if (revision == null) {
+      return true;
+    }
+    final processed = await _backupPolicyRepository!.hasProcessed(scope, asset.id);
+    final latest = await _assetService.getLocalAsset(asset.id);
+    final policy = await _backupPolicyRepository.getPolicy(scope);
+    return (_backupPolicyGuard?.isCurrentScope(scope) ?? true) &&
+        policy.revision == revision &&
+        !policy.isPaused &&
+        !(policy.onlyNew && processed) &&
+        latest != null &&
+        latest.updatedAt == asset.updatedAt &&
+        latest.checksum == asset.checksum;
+  }
+
+  Future<void> _handleUploadSuccess(
+    LocalAsset asset,
+    String remoteId,
+    UploadCallbacks callbacks,
+    String? historyScope,
+    int? historyEpoch, {
+    bool uploaded = true,
+  }) async {
+    if (historyScope != null) {
+      await _backupPolicyRepository?.recordUploaded(
+        historyScope,
+        asset.localId!,
+        checksum: asset.checksum,
+        remoteId: remoteId,
+        mediaStoreEpoch: historyEpoch,
+        reason: uploaded ? BackupHistoryReason.uploaded : BackupHistoryReason.remoteMatched,
+      );
+    }
     callbacks.onSuccess?.call(asset.localId!, remoteId);
+    if (historyScope != null &&
+        (!(_backupPolicyGuard?.isCurrentScope(historyScope) ?? true) ||
+            (await _backupPolicyRepository?.getPolicy(historyScope))?.onlyNew == true)) {
+      return;
+    }
     try {
       await _assetService.stackEditedUpload(asset.localId!, remoteId, asset.checksum);
     } catch (error) {

@@ -3,9 +3,11 @@ import 'dart:async';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/domain/models/album/local_album.model.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
+import 'package:immich_mobile/domain/services/backup_policy_guard.service.dart';
 import 'package:immich_mobile/domain/services/store.service.dart';
 import 'package:immich_mobile/infrastructure/repositories/local_album.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/remote_album.repository.dart';
+import 'package:immich_mobile/providers/backup/backup_policy_guard.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/db.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/store.provider.dart';
 import 'package:immich_mobile/repositories/album_api_repository.dart';
@@ -19,6 +21,7 @@ final syncLinkedAlbumServiceProvider = Provider((ref) {
     db.remoteAlbumRepository,
     ref.watch(albumApiRepositoryProvider),
     ref.watch(storeServiceProvider),
+    backupPolicyGuard: ref.watch(backupPolicyGuardProvider),
   );
 });
 
@@ -27,17 +30,22 @@ class SyncLinkedAlbumService {
   final RemoteAlbumRepository _remoteAlbumRepository;
   final AlbumApiRepository _albumApiRepository;
   final StoreService _storeService;
+  final BackupPolicyGuard? _backupPolicyGuard;
 
   SyncLinkedAlbumService(
     this._localAlbumRepository,
     this._remoteAlbumRepository,
     this._albumApiRepository,
-    this._storeService,
-  );
+    this._storeService, {
+    this._backupPolicyGuard,
+  });
 
   final _log = Logger("SyncLinkedAlbumService");
 
   Future<void> syncLinkedAlbums(String userId, {Completer<void>? cancellation}) async {
+    if (!(await _backupPolicyGuard?.allowsMediaManagement() ?? true)) {
+      return;
+    }
     final selectedAlbums = await _localAlbumRepository.getBackupAlbums();
 
     await Future.wait(
@@ -57,7 +65,9 @@ class SyncLinkedAlbumService {
         // get assets that are uploaded but not in the remote album
         final assetIds = await _remoteAlbumRepository.getLinkedAssetIds(userId, localAlbum.id, linkedRemoteAlbumId);
         _log.fine("Syncing ${assetIds.length} assets to remote album: ${remoteAlbum.name}");
-        if (assetIds.isNotEmpty) {
+        if (assetIds.isNotEmpty &&
+            !(cancellation?.isCompleted ?? false) &&
+            (await _backupPolicyGuard?.allowsMediaManagement() ?? true)) {
           final album = await _albumApiRepository.addAssets(
             remoteAlbum.id,
             assetIds,
@@ -71,6 +81,9 @@ class SyncLinkedAlbumService {
 
   Future<void> manageLinkedAlbums(List<LocalAlbum> localAlbums, String ownerId) async {
     try {
+      if (!(await _backupPolicyGuard?.allowsMediaManagement() ?? true)) {
+        return;
+      }
       for (final album in localAlbums) {
         await _processLocalAlbum(album, ownerId);
       }

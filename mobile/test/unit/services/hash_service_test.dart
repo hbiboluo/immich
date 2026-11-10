@@ -60,7 +60,13 @@ void main() {
 
         verify(() => mocks.nativeApi.api.hashAssets([asset.id], allowNetworkAccess: false)).called(1);
         final captured =
-            verify(() => mocks.localAsset.repo.updateHashes(captureAny())).captured.first as Map<String, String>;
+            verify(
+                  () => mocks.localAsset.repo.updateHashes(
+                    captureAny(),
+                    expectedUpdatedAt: any(named: 'expectedUpdatedAt'),
+                  ),
+                ).captured.first
+                as Map<String, String>;
         expect(captured.length, 1);
         expect(captured[asset.id], result.hash);
       });
@@ -78,7 +84,13 @@ void main() {
         await sut.hashAssets();
 
         final captured =
-            verify(() => mocks.localAsset.repo.updateHashes(captureAny())).captured.first as Map<String, String>;
+            verify(
+                  () => mocks.localAsset.repo.updateHashes(
+                    captureAny(),
+                    expectedUpdatedAt: any(named: 'expectedUpdatedAt'),
+                  ),
+                ).captured.first
+                as Map<String, String>;
         expect(captured.length, 0);
       });
 
@@ -95,7 +107,13 @@ void main() {
         await sut.hashAssets();
 
         final captured =
-            verify(() => mocks.localAsset.repo.updateHashes(captureAny())).captured.first as Map<String, String>;
+            verify(
+                  () => mocks.localAsset.repo.updateHashes(
+                    captureAny(),
+                    expectedUpdatedAt: any(named: 'expectedUpdatedAt'),
+                  ),
+                ).captured.first
+                as Map<String, String>;
         expect(captured.length, 0);
       });
 
@@ -130,7 +148,9 @@ void main() {
         expect(capturedCalls[0], [asset1.id, asset2.id], reason: 'First call should batch the first two assets');
         expect(capturedCalls[1], [asset3.id], reason: 'Second call should have the remaining asset');
 
-        verify(() => mocks.localAsset.repo.updateHashes(any())).called(2);
+        verify(
+          () => mocks.localAsset.repo.updateHashes(any(), expectedUpdatedAt: any(named: 'expectedUpdatedAt')),
+        ).called(2);
       });
 
       test('handles mixed success and failure in batch', () async {
@@ -150,7 +170,13 @@ void main() {
         await sut.hashAssets();
 
         final captured =
-            verify(() => mocks.localAsset.repo.updateHashes(captureAny())).captured.first as Map<String, String>;
+            verify(
+                  () => mocks.localAsset.repo.updateHashes(
+                    captureAny(),
+                    expectedUpdatedAt: any(named: 'expectedUpdatedAt'),
+                  ),
+                ).captured.first
+                as Map<String, String>;
         expect(captured.length, 1);
         expect(captured[asset1.id], 'asset1-hash');
       });
