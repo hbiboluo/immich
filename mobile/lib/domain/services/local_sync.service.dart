@@ -143,27 +143,37 @@ class LocalSyncService {
   }
 
   Future<void> _fullSnapshot() async {
-    final deviceAlbums = await _nativeSyncApi.getAlbums();
-    final dbAlbums = await _localAlbumRepository.getAll();
-    final existing = {for (final album in dbAlbums) album.id: album};
-    final albums = <LocalAlbum>[];
-    final assetsByAlbum = <String, List<LocalAsset>>{};
-    for (final album in deviceAlbums.toLocalAlbums()) {
-      if (_isCancelled) {
-        throw StateError('Media snapshot cancelled');
-      }
-      final assets = await _nativeSyncApi.getAssetsForAlbum(album.id).then((a) => a.toLocalAssets());
-      final old = existing[album.id];
-      albums.add(
-        old == null ? album : old.copyWith(name: album.name, assetCount: album.assetCount, updatedAt: album.updatedAt),
-      );
-      assetsByAlbum[album.id] = assets;
-    }
     if (_isCancelled) {
       throw StateError('Media snapshot cancelled');
     }
-    await _localAlbumRepository.replaceSnapshot(albums, assetsByAlbum);
-    await _nativeSyncApi.checkpointSync();
+    try {
+      await _nativeSyncApi.checkpointSync();
+      final deviceAlbums = await _nativeSyncApi.getAlbums();
+      final dbAlbums = await _localAlbumRepository.getAll();
+      final existing = {for (final album in dbAlbums) album.id: album};
+      final albums = <LocalAlbum>[];
+      final assetsByAlbum = <String, List<LocalAsset>>{};
+      for (final album in deviceAlbums.toLocalAlbums()) {
+        if (_isCancelled) {
+          throw StateError('Media snapshot cancelled');
+        }
+        final assets = await _nativeSyncApi.getAssetsForAlbum(album.id).then((a) => a.toLocalAssets());
+        final old = existing[album.id];
+        albums.add(
+          old == null
+              ? album
+              : old.copyWith(name: album.name, assetCount: album.assetCount, updatedAt: album.updatedAt),
+        );
+        assetsByAlbum[album.id] = assets;
+      }
+      if (_isCancelled) {
+        throw StateError('Media snapshot cancelled');
+      }
+      await _localAlbumRepository.replaceSnapshot(albums, assetsByAlbum);
+    } catch (_) {
+      await _nativeSyncApi.clearSyncCheckpoint();
+      rethrow;
+    }
   }
 
   Future<void> fullSync() async {

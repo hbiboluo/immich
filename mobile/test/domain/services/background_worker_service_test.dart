@@ -8,13 +8,19 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:immich_mobile/constants/constants.dart';
 import 'package:immich_mobile/data/data_controller.dart';
+import 'package:immich_mobile/data/db/logger/database.dart';
 import 'package:immich_mobile/data/db/main/database.dart';
 import 'package:immich_mobile/domain/models/settings_key.dart';
 import 'package:immich_mobile/domain/services/background_worker.service.dart';
 import 'package:immich_mobile/domain/services/hash.service.dart';
 import 'package:immich_mobile/domain/services/local_sync.service.dart';
+import 'package:immich_mobile/domain/services/log.service.dart';
+import 'package:immich_mobile/domain/services/store.service.dart';
 import 'package:immich_mobile/domain/services/sync_stream.service.dart';
+import 'package:immich_mobile/infrastructure/repositories/log.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
+import 'package:immich_mobile/infrastructure/repositories/store.repository.dart';
+import 'package:immich_mobile/providers/infrastructure/platform.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/sync.provider.dart';
 import 'package:immich_mobile/providers/user.provider.dart';
 import 'package:immich_mobile/services/background_upload.service.dart';
@@ -31,6 +37,10 @@ class MockLocalSyncService extends Mock implements LocalSyncService {}
 class MockSyncStreamService extends Mock implements SyncStreamService {}
 
 class MockHashService extends Mock implements HashService {}
+
+class MockDriftLogger extends Mock implements DriftLogger {}
+
+class MockLogRepository extends Mock implements LogRepository {}
 
 void main() {
   late BackgroundWorkerBgService sut;
@@ -132,5 +142,75 @@ void main() {
       remoteSync.complete(true);
       await upload;
     });
+  });
+
+  test('Android cancellation waits for the in-flight upload before closing the database', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    registerFallbackValue(Completer<void>());
+    registerFallbackValue(const UploadCallbacks());
+    final controller = MockDataController();
+    final logDb = MockDriftLogger();
+    final logRepository = MockLogRepository();
+    final localSync = MockLocalSyncService();
+    final remoteSync = MockSyncStreamService();
+    final hash = MockHashService();
+    final userService = MockUserService();
+    final uploadService = MockForegroundUploadService();
+    final nativeSync = MockNativeSyncApi();
+    final started = Completer<void>();
+    final inFlight = Completer<void>();
+    when(() => controller.db).thenReturn(db);
+    when(() => controller.logDb).thenReturn(logDb);
+    when(() => controller.close()).thenAnswer((_) async {});
+    when(() => logDb.optimize()).thenAnswer((_) async {});
+    when(() => logRepository.truncate(limit: any(named: 'limit'))).thenAnswer((_) async {});
+    when(() => logRepository.insertAll(any())).thenAnswer((_) async => true);
+    when(() => localSync.sync()).thenAnswer((_) async {});
+    when(() => remoteSync.sync()).thenAnswer((_) async => true);
+    when(() => hash.hashAssets()).thenAnswer((_) async {});
+    when(() => userService.tryGetMyUser()).thenReturn(UserStub.admin);
+    when(() => userService.watchMyUser()).thenAnswer((_) => const Stream.empty());
+    when(() => nativeSync.cancelHashing()).thenAnswer((_) async {});
+    when(() => uploadService.cancelAndWait()).thenAnswer((_) => inFlight.future);
+    when(
+      () => uploadService.uploadCandidates(any(), any(), callbacks: any(named: 'callbacks'), useSequentialUpload: true),
+    ).thenAnswer((_) {
+      started.complete();
+      return inFlight.future;
+    });
+    final store = await StoreService.init(storeRepository: StoreRepository(db));
+    await LogService.init(
+      logRepository: logRepository,
+      settingsRepository: SettingsRepository.instance,
+      storeService: store,
+    );
+    final service = BackgroundWorkerBgService(
+      dataController: controller,
+      apiService: MockApiService(),
+      overrides: [
+        localSyncServiceProvider.overrideWithValue(localSync),
+        syncStreamServiceProvider.overrideWithValue(remoteSync),
+        hashServiceProvider.overrideWithValue(hash),
+        currentUserProvider.overrideWith((ref) => CurrentUserProvider(userService)),
+        foregroundUploadServiceProvider.overrideWithValue(uploadService),
+        nativeSyncApiProvider.overrideWithValue(nativeSync),
+      ],
+    );
+    final running = service.onAndroidUpload(null);
+    await started.future;
+    var stopped = false;
+    final cancellation = service.cancel().then((_) => stopped = true);
+    try {
+      await pumpEventQueue();
+      expect(stopped, isFalse);
+      verifyNever(() => controller.close());
+      verify(() => uploadService.cancelAndWait()).called(1);
+    } finally {
+      inFlight.complete();
+      await cancellation;
+      await running;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    }
+    verify(() => controller.close()).called(1);
   });
 }

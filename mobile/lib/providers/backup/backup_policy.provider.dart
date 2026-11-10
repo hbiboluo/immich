@@ -15,7 +15,19 @@ import 'package:immich_mobile/providers/infrastructure/store.provider.dart';
 import 'package:immich_mobile/providers/infrastructure/sync.provider.dart';
 import 'package:immich_mobile/providers/user.provider.dart';
 import 'package:immich_mobile/services/foreground_upload.service.dart';
+import 'package:immich_mobile/utils/isolate.dart';
 import 'package:logging/logging.dart';
+
+typedef BackupBaselineRunner = Future<bool?> Function(Future<bool> Function(ProviderContainer) computation);
+
+final backupBaselineRunnerProvider = Provider<BackupBaselineRunner>((ref) {
+  return (computation) => runInIsolateGentle<bool>(computation: computation, debugLabel: 'backup-baseline-scan').future;
+});
+
+Future<bool> _scanBackupBaseline(ProviderContainer ref) async {
+  await ref.read(localSyncServiceProvider).sync(full: true, throwOnError: true, skipMediaManagement: true);
+  return true;
+}
 
 final _backupServerUrlProvider = StreamProvider<String?>((ref) {
   return ref.watch(storeServiceProvider).watch(StoreKey.serverUrl);
@@ -87,7 +99,12 @@ final backupPolicyControllerProvider = Provider<BackupPolicyController>((ref) {
       await ref.read(backgroundWorkerLockServiceProvider).lock();
       await ref.read(backgroundSyncProvider).cancelResumeSyncs();
     },
-    scan: () => ref.read(localSyncServiceProvider).sync(full: true, throwOnError: true, skipMediaManagement: true),
+    scan: () async {
+      final completed = await ref.read(backupBaselineRunnerProvider)(_scanBackupBaseline);
+      if (completed != true) {
+        throw StateError('The media snapshot did not complete');
+      }
+    },
     getMediaStoreVersion: () => ref.read(nativeSyncApiProvider).getMediaStoreVersion(),
     onChanged: refresh,
     resume: () async {

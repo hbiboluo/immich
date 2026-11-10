@@ -58,6 +58,8 @@ void main() {
     mockNativeSyncApi = MockNativeSyncApi();
 
     when(() => mockNativeSyncApi.shouldFullSync()).thenAnswer((_) async => false);
+    when(() => mockNativeSyncApi.checkpointSync()).thenAnswer((_) async {});
+    when(() => mockNativeSyncApi.clearSyncCheckpoint()).thenAnswer((_) async {});
     when(() => mockNativeSyncApi.getMediaChanges()).thenAnswer(
       (_) async => SyncDelta(hasChanges: false, updates: const [], deletes: const [], assetAlbums: const {}),
     );
@@ -105,16 +107,40 @@ void main() {
     when(() => mockNativeSyncApi.checkpointSync()).thenAnswer((_) async {});
     await sut.sync(full: true, throwOnError: true);
     verifyInOrder([
+      () => mockNativeSyncApi.checkpointSync(),
       () => mockNativeSyncApi.getAssetsForAlbum('album'),
       () => mockLocalAlbumRepository.replaceSnapshot(any(), any()),
-      () => mockNativeSyncApi.checkpointSync(),
     ]);
+  });
+
+  test('strict baseline keeps photos created in an already scanned album after the checkpoint', () async {
+    var generation = 10;
+    var checkpoint = 0;
+    when(() => mockNativeSyncApi.checkpointSync()).thenAnswer((_) async => checkpoint = generation);
+    when(() => mockNativeSyncApi.getAlbums()).thenAnswer(
+      (_) async => [
+        PlatformAlbum(id: 'camera', name: 'Camera', isCloud: false, assetCount: 0),
+        PlatformAlbum(id: 'screenshots', name: 'Screenshots', isCloud: false, assetCount: 0),
+      ],
+    );
+    when(() => mockLocalAlbumRepository.getAll()).thenAnswer((_) async => []);
+    when(() => mockNativeSyncApi.getAssetsForAlbum('camera')).thenAnswer((_) async => []);
+    when(() => mockNativeSyncApi.getAssetsForAlbum('screenshots')).thenAnswer((_) async {
+      generation++;
+      return [];
+    });
+    when(() => mockLocalAlbumRepository.replaceSnapshot(any(), any())).thenAnswer((_) async {});
+    await sut.sync(full: true, throwOnError: true);
+    expect(checkpoint, 10);
+    expect(generation, greaterThan(checkpoint));
+    verify(() => mockNativeSyncApi.checkpointSync()).called(1);
   });
 
   test('strict baseline scans propagate album enumeration failures', () async {
     when(() => mockNativeSyncApi.getAlbums()).thenThrow(StateError('permission revoked'));
     await expectLater(sut.sync(full: true, throwOnError: true, skipMediaManagement: true), throwsStateError);
-    verifyNever(() => mockNativeSyncApi.checkpointSync());
+    verifyNever(() => mockLocalAlbumRepository.replaceSnapshot(any(), any()));
+    verify(() => mockNativeSyncApi.clearSyncCheckpoint()).called(1);
   });
 
   test('strict baseline scans propagate failures inside an album', () async {
@@ -124,7 +150,8 @@ void main() {
     when(() => mockLocalAlbumRepository.getAll()).thenAnswer((_) async => []);
     when(() => mockNativeSyncApi.getAssetsForAlbum('album')).thenThrow(StateError('scan interrupted'));
     await expectLater(sut.sync(full: true, throwOnError: true), throwsStateError);
-    verifyNever(() => mockNativeSyncApi.checkpointSync());
+    verifyNever(() => mockLocalAlbumRepository.replaceSnapshot(any(), any()));
+    verify(() => mockNativeSyncApi.clearSyncCheckpoint()).called(1);
   });
 
   test('new-files mode blocks the public local trash synchronization entry', () async {

@@ -262,6 +262,10 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
         _cancellationToken.complete();
       }
 
+      if (CurrentPlatform.isAndroid) {
+        await _ref?.read(foregroundUploadServiceProvider).cancelAndWait();
+      }
+
       // Workers share one sqlite connection, so DB teardown must wait until every worker has stopped using it.
       await Future.wait([if (nativeSyncApi != null) nativeSyncApi.cancelHashing()]);
       await workerManagerPatch.dispose().catchError((_) async {});
